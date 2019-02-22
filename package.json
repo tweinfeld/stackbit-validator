@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "description": "Utility for validating template files against Stackbit's Content Model",
   "main": "index.js",
+  "bin": "index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1"
   },
@@ -18,6 +19,7 @@
     "js-yaml": "^3.12.1",
     "kefir": "^3.8.6",
     "lodash": "^4.17.11",
-    "minimatch": "^3.0.4"
+    "minimatch": "^3.0.4",
+    "yargs": "^13.2.1"
   }
 }
