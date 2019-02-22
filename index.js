@@ -1,4 +1,5 @@
 const
+    _ = require('lodash'),
     fs = require('fs'),
     fp = require('lodash/fp'),
     path = require('path'),
@@ -7,7 +8,6 @@ const
     minimatch = require('minimatch');
 
 const
-    MODEL_NAME_SYMBOL = Symbol('name'),
     TESTBED_FOLDER = path.join(__dirname, '.testbed'),
     MODEL_FILE_NAME = "content-model.yml",
     CONTENT_FILE_EXTENSION = '.md',
@@ -28,26 +28,81 @@ const
                             : entryFsStat.isDirectory() ? createFolderFilenameStream(entryPath) : kefir.never());
 
             });
-    };
+    },
+    validateModel = (allModels, model, content)=> {
+        const validationErrors = [];
 
-const getContentWarningByModel = (function(library){
-    return (allModels)=> (model, post)=> fp.flatMap(({ test, message })=> test(model, post) ? [message(model, post)] : [], library);
-})([
-    { "test": ({ hideContent }, { body: postBody })=> hideContent && !/^\s*$/.test(postBody), "message": fp.always('"hideContent" is set, but the post contains content') },
-    { "test": ({ template: modelTemplate }, { front_matter: { template: postTemplate } })=> !fp.equals(modelTemplate, postTemplate), "message": ({ template: modelTemplate })=>`Templates mismatch (expected "${modelTemplate}")` },
-    { "test": (model, { front_matter: postFrontmatter })=> {
-        postFrontmatter
-    }}
-]);
+        let registerValidationMessage = (message, path)=> {
+            return validationErrors.push({ message, path }) && false;
+        };
+
+        const validateNode = function(modelNode, contentPath = ""){
+
+            const
+                contentNode = contentPath ? _.get(content, contentPath) : content,
+                modelType = _.get(modelNode, 'type');
+
+            const iterateFields = (contentNode)=> {
+                return _(contentNode).omit('menus', 'template').keys().every((key)=> {
+                    const nextModelNode = _(modelNode).chain().get('fields').find({ name: key }).value();
+                    return (!!nextModelNode || registerValidationMessage(`Could not find a model definition for field "${key}"`, contentPath)) && validateNode(nextModelNode, [contentPath, key].filter(Boolean).join('.'));
+                });
+            };
+
+            return (!!modelType || registerValidationMessage(`"type" isn't defined in this node's model`, contentPath)) && (({
+                "object": iterateFields,
+                "page": iterateFields,
+                "number": (contentNode)=> _.isNumber(contentNode) || registerValidationMessage(`Boolean expected`, contentPath),
+                "boolean": (contentNode)=> _.isBoolean(contentNode) || registerValidationMessage(`Boolean expected`, contentPath),
+                "string": (contentNode)=> _.isString(contentNode) || registerValidationMessage(`String expected`, contentPath),
+                "image": (contentNode)=> _.isString(contentNode) || registerValidationMessage(`Image expected`, contentPath),
+                "markdown": (contentNode)=> _.isString(contentNode) || registerValidationMessage(`Markdown expected`, contentPath),
+                "list": (contentNode)=> _(contentNode).map((nextContentNode, index)=> {
+                    const nextModelNode = _.get(modelNode, 'items');
+                    return (nextModelNode || registerValidationMessage(`List doesn't contain "items" model`, contentPath)) && validateNode(nextModelNode, [contentPath, `[${index}]`].filter(Boolean).join(''));
+                }).every(Boolean),
+                "reference": (contentNode)=> {
+
+                    let
+                        ref = registerValidationMessage,
+                        localMessages = [];
+
+                    let res = modelNode["models"].some((nextModelPath)=> {
+                        registerValidationMessage = (message, path)=> localMessages.push({ message: `Reference attempting model "${nextModelPath}": ${message}"`, path }) && false;
+                        const nextModelNode = _.get(allModels, nextModelPath);
+                        return validateNode(nextModelNode, contentPath);
+                    });
+
+                    registerValidationMessage = ref;
+                    return res || localMessages.some(({ message, path })=> registerValidationMessage(message, path));
+                },
+                "enum": (contentNode)=> {
+                    return _(modelNode).chain().get('options').includes(contentNode).value() || registerValidationMessage(`Invalid enum value "${_.toString(contentNode)}"`,contentPath);
+                }
+            })[modelType] || (()=> registerValidationMessage(`Unknown field type "${modelType}"`, contentPath)))(contentNode);
+        };
+
+        validateNode(model);
+        return validationErrors;
+    },
+    validateExternal = (function(testLibrary){
+        return (allModels, model, post)=> {
+
+            return fp.flatMap(({test, message}) => test(model, post, allModels) ? message(model, post, allModels) : [], testLibrary)
+        };
+    })([
+        { "test": ({ hideContent }, { body: postBody })=> hideContent && !/^\s*$/.test(postBody), "message": fp.always([{ message: '"hideContent" is set, but the post contains content' }]) },
+        { "test": ({ template: modelTemplate }, { front_matter: { template: postTemplate } })=> !fp.equals(modelTemplate, postTemplate), "message": ({ template: modelTemplate })=> [{ message: `Templates mismatch (expected "${modelTemplate}")` }] },
+        { "test": (model, { front_matter })=> model && front_matter, "message": (model, { front_matter }, allModels)=> validateModel(allModels, model, front_matter) }
+    ]);
 
 const modelProperty = kefir
     .fromNodeCallback(fs.readFile.bind(null, path.join(TESTBED_FOLDER, MODEL_FILE_NAME)))
-    .map(yaml.safeLoad)
-    .map(fp.pipe(fp.get('models'), fp.map.convert({ 'cap': false })((v, k)=> ({ [MODEL_NAME_SYMBOL]: k, ...v }))))
+    .map(fp.pipe(yaml.safeLoad, fp.get('models')))
     .flatMap((models)=> {
-        const
-            contentPath = path.join(TESTBED_FOLDER, CONTENT_FILES_FOLDER_NAME),
-            validateModel = getContentWarningByModel(models);
+
+        const contentPath = path.join(TESTBED_FOLDER, CONTENT_FILES_FOLDER_NAME);
+
         return createFolderFilenameStream(contentPath)
             .filter(fp.pipe(path.extname, fp.toLower, fp.equals(CONTENT_FILE_EXTENSION)))
             .flatMapConcurLimit((mdFilename)=> {
@@ -76,10 +131,10 @@ const modelProperty = kefir
 
                 return {
                     path: postPath,
-                    warning: fp.isError(postFrontmatter) ? ["Contains invalid front-matter block"] : [
-                        !matchingModels.length && "No eligible models found to match",
-                        matchingModels.filter(({ singleInstance, file })=> singleInstance && file).length > 1 && "More than one single-instance model matches",
-                        ...(matchingModels[0] ? validateModel(matchingModels[0], post) : [])
+                    warning: fp.isError(postFrontmatter) ? [{ message: "Contains invalid front-matter block", internal: postFrontmatter }] : [
+                        !matchingModels.length && { message: "No eligible models found to match" },
+                        matchingModels.filter(({ singleInstance, file })=> singleInstance && file).length > 1 && { message: "More than one single-instance model matches" },
+                        ...validateExternal(models, matchingModels[0], post)
                     ].filter(Boolean)
                 };
             });
