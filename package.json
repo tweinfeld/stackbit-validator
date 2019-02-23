@@ -2,8 +2,8 @@
   "name": "stackbit-content-validator",
   "version": "1.0.0",
   "description": "Utility for validating template files against Stackbit's Content Model",
-  "main": "content_validator.js",
-  "bin": "index.js",
+  "main": "index.js",
+  "bin": "cli.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1"
   },

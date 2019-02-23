@@ -25,15 +25,13 @@ const
                     .flatMap((entryFsStat) => entryFsStat.isFile()
                         ? kefir.constant(entryPath)
                         : entryFsStat.isDirectory() ? createFolderFilenameStream(entryPath) : kefir.never());
-
             });
     },
-    validateModel = (allModels, model, content)=> {
-        const validationErrors = [];
 
-        let registerValidationMessage = (message, path)=> {
-            return validationErrors.push({ message, path }) && false;
-        };
+    validateContent = (allModels, model, content)=> {
+
+        const validationErrors = [];
+        let registerValidationMessage = (message, path)=> validationErrors.push({ message, path }) && false;
 
         const validateNode = function(modelNode, contentPath = ""){
 
@@ -42,10 +40,24 @@ const
                 modelType = _.get(modelNode, 'type');
 
             const iterateFields = (contentNode)=> {
-                return _(contentNode).omit('menus', 'template').keys().every((key)=> {
-                    const nextModelNode = _(modelNode).chain().get('fields').find({ name: key }).value();
-                    return (!!nextModelNode || registerValidationMessage(`Could not find a model definition for field "${key}"`, contentPath)) && validateNode(nextModelNode, [contentPath, key].filter(Boolean).join('.'));
-                });
+                return [
+                    _(modelNode)
+                        .chain()
+                        .get('fields')
+                        .filter({ required: true })
+                        .map('name')
+                        .map((fieldName)=> _.has(contentNode, fieldName) || registerValidationMessage(`Required field ${fieldName} is missing`, contentPath))
+                        .every(Boolean)
+                        .value(),
+                        _(contentNode)
+                            .omit('menus', 'template')
+                            .keys()
+                            .map((key)=> {
+                                const nextModelNode = _(modelNode).chain().get('fields').find({ name: key }).value();
+                                return (!!nextModelNode || registerValidationMessage(`Could not find a model definition for field "${key}"`, contentPath)) && validateNode(nextModelNode, [contentPath, key].filter(Boolean).join('.'));
+                            })
+                            .every(Boolean)
+                    ].reduce((a, b)=> a && b);
             };
 
             return (!!modelType || registerValidationMessage(`"type" isn't defined in this node's model`, contentPath)) && (({
@@ -53,6 +65,7 @@ const
                 "page": iterateFields,
                 "number": (contentNode)=> _.isNumber(contentNode) || registerValidationMessage(`Boolean expected`, contentPath),
                 "boolean": (contentNode)=> _.isBoolean(contentNode) || registerValidationMessage(`Boolean expected`, contentPath),
+                "text": (contentNode)=> _.isString(contentNode) || registerValidationMessage(`Text expected`, contentPath),
                 "string": (contentNode)=> _.isString(contentNode) || registerValidationMessage(`String expected`, contentPath),
                 "image": (contentNode)=> _.isString(contentNode) || registerValidationMessage(`Image expected`, contentPath),
                 "markdown": (contentNode)=> _.isString(contentNode) || registerValidationMessage(`Markdown expected`, contentPath),
@@ -66,8 +79,8 @@ const
                         ref = registerValidationMessage,
                         localMessages = [];
 
-                    let res = modelNode["models"].some((nextModelPath)=> {
-                        registerValidationMessage = (message, path)=> localMessages.push({ message: `Reference attempting model "${nextModelPath}": ${message}"`, path }) && false;
+                    let res = (modelNode["models"] || []).some((nextModelPath)=> {
+                        registerValidationMessage = (message, path)=> localMessages.push({ message: `Attempting model "${nextModelPath}": ${message}`, path }) && false;
                         const nextModelNode = _.get(allModels, nextModelPath);
                         return validateNode(nextModelNode, contentPath);
                     });
@@ -85,16 +98,12 @@ const
         return validationErrors;
     },
     validateExternal = (function(testLibrary){
-        return (allModels, model, post)=> {
-
-            return fp.flatMap(({test, message}) => test(model, post, allModels) ? message(model, post, allModels) : [], testLibrary)
-        };
+        return (allModels, model, post)=> fp.flatMap(({test, message}) => test(model, post, allModels) ? message(model, post, allModels) : [], testLibrary);
     })([
         { "test": ({ hideContent }, { body: postBody })=> hideContent && !/^\s*$/.test(postBody), "message": fp.always([{ message: '"hideContent" is set, but the post contains content' }]) },
-        { "test": ({ template: modelTemplate }, { front_matter: { template: postTemplate } })=> !fp.equals(modelTemplate, postTemplate), "message": ({ template: modelTemplate })=> [{ message: `Templates mismatch (expected "${modelTemplate}")` }] },
-        { "test": (model, { front_matter })=> model && front_matter, "message": (model, { front_matter }, allModels)=> validateModel(allModels, model, front_matter) }
+        { "test": ({ template: modelTemplate }, { front_matter: { template: postTemplate } })=> !fp.equals(modelTemplate, postTemplate), "message": ({ template: modelTemplate }, { front_matter: { template: postTemplate } })=> [{ message: `Templates mismatch (expected "${modelTemplate}", got "${postTemplate}")` }] },
+        { "test": (model, { front_matter })=> model && front_matter, "message": (model, { front_matter }, allModels)=> validateContent(allModels, model, front_matter) }
     ]);
-
 
 module.exports = function(folder, contentFilesFolder = CONTENT_FILES_FOLDER_NAME, modelFile = MODEL_FILE_NAME, contentFileExtension = CONTENT_FILE_EXTENSION){
 
@@ -102,9 +111,7 @@ module.exports = function(folder, contentFilesFolder = CONTENT_FILES_FOLDER_NAME
         .fromNodeCallback(fs.readFile.bind(null, path.join(folder, modelFile)))
         .map(fp.pipe(yaml.safeLoad, fp.get('models')))
         .flatMap((models)=> {
-
             const contentPath = path.join(folder, contentFilesFolder);
-
             return createFolderFilenameStream(contentPath)
                 .filter(fp.pipe(path.extname, fp.toLower, fp.equals(contentFileExtension)))
                 .flatMapConcurLimit((mdFilename)=> {
@@ -133,7 +140,7 @@ module.exports = function(folder, contentFilesFolder = CONTENT_FILES_FOLDER_NAME
 
                     return {
                         path: postPath,
-                        warning: fp.isError(postFrontmatter) ? [{ message: "Contains invalid front-matter block", internal: postFrontmatter }] : [
+                        error: fp.isError(postFrontmatter) ? [{ message: "Contains invalid front-matter block", internal: postFrontmatter }] : [
                             !matchingModels.length && { message: "No eligible models found to match" },
                             matchingModels.filter(({ singleInstance, file })=> singleInstance && file).length > 1 && { message: "More than one single-instance model matches" },
                             ...validateExternal(models, matchingModels[0], post)
@@ -142,14 +149,3 @@ module.exports = function(folder, contentFilesFolder = CONTENT_FILES_FOLDER_NAME
                 });
         });
 };
-
-
-
-
-
-
-
-
-
-
-
