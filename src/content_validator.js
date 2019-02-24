@@ -43,6 +43,11 @@ const
                 return [
                     _(modelNode)
                         .chain()
+                        .get('labelField')
+                        .thru((labelField)=> !labelField || !!_(modelNode).chain().get('fields').has(labelField).value() || registerValidationMessage(`labelField "${labelField}" cannot be found in the fields set`, contentPath))
+                        .value(),
+                    _(modelNode)
+                        .chain()
                         .get('fields')
                         .filter({ required: true })
                         .map('name')

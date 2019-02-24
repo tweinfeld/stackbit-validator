@@ -58,12 +58,12 @@ let arg = argv
             return output === "pretty"
                 ? console.log(
                     _(res)
-                        .map(({ name, error })=> error.length && `---> ${name}\n${error.map((message)=>`      ${message}`)}`)
+                        .map(({ path, error })=> error.length && `---> ${path}\n${error.map((message)=>`      ${message}`)}`)
                         .compact()
                         .thru((errors)=> errors.length ? errors.join('\n') : "All good!")
                         .value()
                 )
-                : console.log(res);
+                : console.log(inspect(res, { depth:10 }));
         }
     })
     .help()
